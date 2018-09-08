@@ -17,32 +17,19 @@ class Match:
         self.home_score = 0
         self.guest_score = 0
 
-    def inc_home_score(self):
-        self.home_score += 1
-
-    def dec_home_score(self):
-        if self.home_score > 0:
-            self.home_score -= 1
-
-    def inc_guest_score(self):
-        self.guest_score += 1
-
-    def dec_guest_score(self):
-        if self.guest_score > 0:
-            self.guest_score -= 1
-
     def to_buttons(self, row):
         buttons = [InlineKeyboardButton('-', callback_data='{} -home'.format(row)),
                     InlineKeyboardButton(self.home, callback_data='{} +home'.format(row)),
-                    InlineKeyboardButton('{} : {}'.format(self.home_score, self.guest_score), callback_data='{} nop'.format(row)),
+                    InlineKeyboardButton('{} : {}'.format(self.home_score, self.guest_score), callback_data='nop'.format(row)),
                     InlineKeyboardButton(self.guest, callback_data='{} +guest'.format(row)),
                     InlineKeyboardButton('-', callback_data='{} -guest'.format(row))]
         return buttons
 
-def matches_to_keyboard(matches):
+
+def matchday_to_keyboard(matchday):
     keyboard = []
-    for i in range(len(matches)):
-        keyboard.append(matches[i].to_buttons(i))
+    for i in range(len(matchday)):
+        keyboard.append(matchday[i].to_buttons(i))
     keyboard.append([InlineKeyboardButton('Done 🙈', callback_data='done')])
     return keyboard
 
@@ -51,18 +38,23 @@ def start(bot, update):
     log.log(log.INFO, 'Received start command message {}'.format(update.message))
     bot.send_message(chat_id=update.message.chat_id, text='You wanna start? But I\'m not ready yet :(')
 
+
 def key(bot, update):
-    global matches
+    global matchday
     match0 = Match('FCB', 'FCN')
     match1 = Match('BVB', 'S04')
-    matches = [match0, match1]
+    matchday = [match0, match1]
 
-    reply_markup = InlineKeyboardMarkup(matches_to_keyboard(matches))
+    reply_markup = InlineKeyboardMarkup(matchday_to_keyboard(matchday))
     update.message.reply_text('Here we go:', reply_markup=reply_markup)
 
+
 def button(bot, update):
-    global matches
+    global matchday
     query = update.callback_query
+
+    if query.data == 'nop':
+        return
 
     if query.data == 'done':
         bot.edit_message_text(chat_id=query.message.chat_id,
@@ -71,28 +63,32 @@ def button(bot, update):
         return
 
     row, command = query.data.split(' ')
-    row = int(row)
-    if command == 'nop':
-        return
-    elif command == '+home':
-        matches[row].inc_home_score()
+    match = matchday[int(row)]
+    if command == '+home':
+        match.home_score += 1
     elif command == '-home':
-        matches[row].dec_home_score()
+        if match.home_score > 0:
+            match.home_score -= 1
+        else:
+            return
     elif command == '+guest':
-        matches[row].inc_guest_score()
+        match.guest_score += 1
     elif command == '-guest':
-        matches[row].dec_guest_score()
+        if match.guest_score > 0:
+            match.guest_score -= 1
+        else:
+            return
     else:
         assert False, 'Unexpected button callback {}'.format(command)
 
-    reply_markup = InlineKeyboardMarkup(matches_to_keyboard(matches))
+    reply_markup = InlineKeyboardMarkup(matchday_to_keyboard(matchday))
 
     bot.edit_message_reply_markup(chat_id=query.message.chat_id,
                           message_id=query.message.message_id,
                           reply_markup=reply_markup)
 
 
-    def main(token, storage):
+def main(token, storage):
     updater = Updater(token=token)
     dispatcher = updater.dispatcher
     log.log(log.INFO, 'Bot controller started')
