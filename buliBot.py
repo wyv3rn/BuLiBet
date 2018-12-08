@@ -2,12 +2,14 @@
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
+from collections import defaultdict
 import logging as log
 import time
 import sys
 import argparse
 import urllib.request
 import re
+import copy
 
 log.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=log.INFO)
 
@@ -32,10 +34,11 @@ team_short = {
     'Mainz': 'FSV'
 }
 
+user_db = defaultdict(lambda: {'matchdays': {}})
+
 HIGHEST_INC = 2
 
 def fetch_matchday(day):
-    global matchday
     matchday = []
 
     # TODO don't hardcode
@@ -43,22 +46,43 @@ def fetch_matchday(day):
     contents = urllib.request.urlopen(url).read().decode()
 
     teams = []
-    for result in re.finditer(r'<div class="ovVrnLink2015">\r\n\r\n.*\r\n.*class=".*">(?P<team>.*)</a>\r\n\r\n</div>', contents):
-        team = result.group('team')
-        teams.append(team)
-        if len(teams) == 2:
-            # match complete
-            match = Match(teams[0], teams[1])
-            matchday.append(match)
-            teams = []
+    team_regex = r'<div class="ovVrnLink2015">\r\n\r\n.*\r\n.*class=".*">(?P<{}>.*)</a>\r\n\r\n</div>\r\n'
+    home_team_regex = team_regex.format('home_team')
+    guest_team_regex = team_regex.format('guest_team')
+    score_regex = r'<td class="alignleft nowrap".*>(?P<home_final>[0-9\-]+):(?P<guest_final>[0-9\-]+).*&nbsp;\(.*(?P<home_half>[0-9\-]+):(?P<guest_half>[0-9\-]+).*\)</td>'
+    match_regex = r'{}(.*\r\n){{6}}{}(.*\r\n){{3}}{}'.format(home_team_regex, guest_team_regex, score_regex)
+    log.log(log.DEBUG, 'Match regex {}'.format(match_regex))
+    for result in re.finditer(match_regex, contents):
+        home_team = result.group('home_team')
+        guest_team = result.group('guest_team')
+        home_final = result.group('home_final')
+        guest_final = result.group('guest_final')
+        home_half = result.group('home_half')
+        guest_half = result.group('guest_half')
+        log.log(log.INFO, 'Parsed match: {} {}:{} ({}:{}) {}'.format(home_team, home_final, guest_final, home_half, guest_half, guest_team))
+        home_current = home_final
+        if home_current == '-':
+            home_current = home_half
+        guest_current = guest_final
+        if guest_current == '-':
+            guest_current = guest_half
+
+        home_current = home_current.replace('-', '-1')
+        guest_current = guest_current.replace('-', '-1')
+
+        home_score = int(home_current)
+        guest_score = int(guest_current)
+
+        match = Match(home_team, guest_team, home_score, guest_score)
+        matchday.append(match)
     return matchday
 
 class Match:
-    def __init__(self, home, guest):
+    def __init__(self, home, guest, home_score, guest_score):
         self.home = home
         self.guest = guest
-        self.home_score = 0
-        self.guest_score = 0
+        self.home_score = home_score
+        self.guest_score = guest_score
 
     def to_inc_buttons(self, row, highest_inc=HIGHEST_INC):
         buttons = []
@@ -75,6 +99,15 @@ class Match:
             inc += 1
             buttons.append(InlineKeyboardButton('+{}'.format(inc), callback_data='{} +{} guest'.format(row, inc)))
         return buttons
+
+    def has_started(self):
+        return self.home_score != -1
+
+    def create_bet_match(self):
+        bet = copy.copy(self)
+        bet.home_score = 0
+        bet.guest_score = 0
+        return bet
 
     def to_string(self):
         return '{} {}:{} {}'.format(self.home, self.home_score, self.guest_score, self.guest)
@@ -94,27 +127,41 @@ def matchday_to_string(matchday):
 
 def start(bot, update):
     log.log(log.INFO, 'Received start command message {}'.format(update.message))
-    bot.send_message(chat_id=update.message.chat_id, text='You wanna start? But I\'m not ready yet :(')
+    bot.send_message(chat_id=update.message.chat_id, text='You wanna start? But beware that I\'m in beta testing!')
 
 def bet(bot, update, args):
-    # TODO use database instead of one global variable ...
-    # or just parse buttons again? and only save in database after user is "done"
-    global matchday
+    global user_db
     # TODO check args
+    user_id = update.message.from_user.id
+    day = int(args[0])
+    matchday = fetch_matchday(day)
+    betday = []
+    for match in matchday:
+        if not match.has_started():
+            betday.append(match.create_bet_match())
+
+    user_db[user_id]['matchdays'][day] = betday
+
+    reply_markup = InlineKeyboardMarkup(matchday_to_inc_keyboard(betday))
+    update.message.reply_text('Spieltag {}:'.format(day), reply_markup=reply_markup)
+
+def test(bot, update, args):
     day = int(args[0])
     fetch_matchday(day)
 
-    reply_markup = InlineKeyboardMarkup(matchday_to_inc_keyboard(matchday))
-    update.message.reply_text('Spieltag {}:'.format(day), reply_markup=reply_markup)
-
-
 def button(bot, update):
-    global matchday
+    global user_db
     query = update.callback_query
     username = query.from_user.username
     user_id = query.from_user.id
     msg = query.message.text
     log.log(log.INFO, 'Received button callback from user {} ({}), base message "{}"'.format(username, user_id, msg))
+
+    # TODO might be other base messages sometimes
+    day_re = re.search(r'Spieltag (?P<day>[0-9]+):', msg)
+    day = int(day_re.group('day'))
+
+    matchday = user_db[user_id]['matchdays'][day]
 
     if query.data == 'nop':
         return
@@ -122,7 +169,7 @@ def button(bot, update):
     if query.data == 'done':
         bot.edit_message_text(chat_id=query.message.chat_id,
                         message_id=query.message.message_id,
-                        text=matchday_to_string(matchday))
+                        text='{}\n{}'.format(msg, matchday_to_string(matchday)))
         return
 
     row, command, arg = query.data.split(' ')
@@ -165,6 +212,7 @@ def main(token, storage):
 
     dispatcher.add_handler(CommandHandler('start', start))
     dispatcher.add_handler(CommandHandler('bet', bet, pass_args=True))
+    dispatcher.add_handler(CommandHandler('test', test, pass_args=True))
     updater.dispatcher.add_handler(CallbackQueryHandler(button))
 
     log.log(log.INFO, 'Starting to poll ...')
