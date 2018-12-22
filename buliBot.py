@@ -10,6 +10,7 @@ import argparse
 import urllib.request
 import re
 import copy
+import json
 
 log.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=log.INFO)
 
@@ -35,8 +36,18 @@ team_short = {
 }
 
 user_db = defaultdict(lambda: {'matchdays': {}})
+match_db = {}
 
 HIGHEST_INC = 2
+
+# TODO use tinydb (or similar)
+def dump_user_db():
+    with open('userdb.txt', 'w') as file:
+        file.write(json.dumps(user_db))
+
+def load_user_db():
+    with open('userdb.txt', 'r') as file:
+        user_db = json.load(file)
 
 def fetch_matchday(day):
     matchday = []
@@ -105,24 +116,65 @@ class Match:
 
     def create_bet_match(self):
         bet = copy.copy(self)
-        bet.home_score = 0
-        bet.guest_score = 0
+        if self.has_started():
+            bet.home_score = -1
+            bet.guest_score = -1
+        else:
+            bet.home_score = 0
+            bet.guest_score = 0
         return bet
 
+    def eval(self, other):
+        if not (self.has_started() and other.has_started()):
+            return 0
+        if self.home_score == other.home_score and self.guest_score == other.guest_score:
+            return 3
+
+        self_rel = 0
+        if self.home_score > self.guest_score:
+            self_rel = 1
+        elif self.home_score < self.guest_score:
+            self_rel = -1
+        other_rel = 0
+        if other.home_score > other.guest_score:
+            other_rel = 1
+        elif other.home_score < other.guest_score:
+            other_rel = -1
+
+        if self_rel == other_rel:
+            return 1
+        else:
+            return 0
+
     def to_string(self):
-        return '{} {}:{} {}'.format(self.home, self.home_score, self.guest_score, self.guest)
+        string = '{} {}:{} {}'.format(self.home, self.home_score, self.guest_score, self.guest)
+        return string.replace('-1', '-')
 
 
 def matchday_to_inc_keyboard(matchday):
     keyboard = []
     for i in range(len(matchday)):
-        keyboard.append(matchday[i].to_inc_buttons(i))
+        if matchday[i].home_score != -1:
+            # -1 indicates that it's too late to bet
+            keyboard.append(matchday[i].to_inc_buttons(i))
     keyboard.append([InlineKeyboardButton('Done 🙈', callback_data='done')])
     return keyboard
 
 def matchday_to_string(matchday):
     match_strings = [match.to_string() for match in matchday]
     return '\n'.join(match_strings)
+
+def evaluate_matchday(matchday, betday):
+    points = 0
+    string = ''
+    for i in range(len(matchday)):
+        match = matchday[i]
+        bet = betday[i]
+        points += match.eval(bet)
+        string += '{} {} {}:{} ({}:{})\n'.format(match.home, match.guest, bet.home_score, bet.guest_score, match.home_score, match.guest_score)
+    string = string.replace('-1', '-')
+    string += 'Summe: {} Punkte'.format(points)
+    return points, string
 
 
 def start(bot, update):
@@ -132,15 +184,16 @@ def start(bot, update):
 def bet(bot, update, args):
     global user_db
     # TODO check args
+    # TODO support updating the bet even after some matches have started
     user_id = update.message.from_user.id
     day = int(args[0])
     matchday = fetch_matchday(day)
     betday = []
     for match in matchday:
-        if not match.has_started():
-            betday.append(match.create_bet_match())
+        betday.append(match.create_bet_match())
 
     user_db[user_id]['matchdays'][day] = betday
+    match_db[day] = matchday
 
     reply_markup = InlineKeyboardMarkup(matchday_to_inc_keyboard(betday))
     update.message.reply_text('Spieltag {}:'.format(day), reply_markup=reply_markup)
@@ -154,22 +207,38 @@ def button(bot, update):
     query = update.callback_query
     username = query.from_user.username
     user_id = query.from_user.id
-    msg = query.message.text
-    log.log(log.INFO, 'Received button callback from user {} ({}), base message "{}"'.format(username, user_id, msg))
+    message = query.message
+    msg_text = message.text
+    log.log(log.INFO, 'Received button callback from user {} ({}), base message "{}"'.format(username, user_id, msg_text))
 
-    # TODO might be other base messages sometimes
-    day_re = re.search(r'Spieltag (?P<day>[0-9]+):', msg)
+    # TODO might be other base messages sometime
+    day_re = re.search(r'Spieltag (?P<day>[0-9]+):', msg_text)
     day = int(day_re.group('day'))
 
-    matchday = user_db[user_id]['matchdays'][day]
+    betday = user_db[user_id]['matchdays'][day]
 
     if query.data == 'nop':
         return
 
+    if query.data == 'update':
+        matchday = fetch_matchday(day)
+        match_db[day] = matchday
+        points, string = evaluate_matchday(matchday, betday)
+        update_text = 'Spieltag {}:\n{}'.format(day, string)
+        if(update_text != msg_text):
+            update_markup = InlineKeyboardMarkup([[InlineKeyboardButton('Update', callback_data='update')]])
+            bot.edit_message_text(chat_id=message.chat_id,
+                            message_id=message.message_id,
+                            text=update_text,
+                            reply_markup=update_markup)
+        return
+
     if query.data == 'done':
-        bot.edit_message_text(chat_id=query.message.chat_id,
-                        message_id=query.message.message_id,
-                        text='{}\n{}'.format(msg, matchday_to_string(matchday)))
+        update_markup = InlineKeyboardMarkup([[InlineKeyboardButton('Update', callback_data='update')]])
+        bot.edit_message_text(chat_id=message.chat_id,
+                        message_id=message.message_id,
+                        text='{}\n{}'.format(msg_text, matchday_to_string(betday)),
+                        reply_markup=update_markup)
         return
 
     row, command, arg = query.data.split(' ')
@@ -177,7 +246,7 @@ def button(bot, update):
         log.log(log.WARNING, 'FIXME: Unexpected argument: {}'.format(arg))
         return
 
-    match = matchday[int(row)]
+    match = betday[int(row)]
     if command == 'reset':
         if arg == 'home':
             if match.home_score == 0:
@@ -198,10 +267,10 @@ def button(bot, update):
         else:
             match.guest_score += inc
 
-    reply_markup = InlineKeyboardMarkup(matchday_to_inc_keyboard(matchday))
+    reply_markup = InlineKeyboardMarkup(matchday_to_inc_keyboard(betday))
 
-    bot.edit_message_reply_markup(chat_id=query.message.chat_id,
-                          message_id=query.message.message_id,
+    bot.edit_message_reply_markup(chat_id=message.chat_id,
+                          message_id=message.message_id,
                           reply_markup=reply_markup)
 
 
