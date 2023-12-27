@@ -183,7 +183,7 @@ def evaluate_matchday(matchday, betday):
         match = matchday[i]
         bet = betday[i]
         points += match.eval(bet)
-        string += '{} {} {}:{} ({}:{})\n'.format(match.home, match.guest, bet.home_score, bet.guest_score, match.home_score, match.guest_score)
+        string += '{} - {} {}:{} ({}:{})\n'.format(match.home, match.guest, bet.home_score, bet.guest_score, match.home_score, match.guest_score)
     string = string.replace('-1', '-')
     string += 'Summe: {} Punkte'.format(points)
     return points, string
